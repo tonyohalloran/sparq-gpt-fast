@@ -51,13 +51,21 @@ class ModelArgs:
     @classmethod
     def from_name(cls, name: str, **config_kwargs):
         if name in transformer_configs:
-            return cls(**transformer_configs[name], **config_kwargs)
+            # Start with the base configuration
+            base_config = transformer_configs[name].copy()
+            # Update with any keyword arguments (allowing overrides)
+            base_config.update(config_kwargs)
+            return cls(**base_config)
         # fuzzy search
         config = [
             config
             for config in transformer_configs
             if config.lower() in str(name).lower()
         ]
+
+        # Check if no configurations were found
+        if not config:
+            raise ValueError(f"No matching configuration found for model name: {name}. Available configurations: {list(transformer_configs.keys())}")
 
         # We may have two or more configs matched (e.g. "7B" and "Mistral-7B"). Find the best config match,
         # take longer name (as it have more symbols matched)
@@ -67,7 +75,11 @@ class ModelArgs:
                 config[1]
             ), name  # make sure only one 'best' match
 
-        return cls(**transformer_configs[config[0]], **config_kwargs)
+        # Start with the base configuration
+        base_config = transformer_configs[config[0]].copy()
+        # Update with any keyword arguments (allowing overrides)
+        base_config.update(config_kwargs)
+        return cls(**base_config)
 
 
 transformer_configs = {
@@ -122,6 +134,17 @@ transformer_configs = {
         vocab_size=128256,
         rope_base=500000,
     ),
+    "Llama-3.1-8B-Instruct": dict(
+        block_size=131072,
+        n_layer=32,
+        n_head=32,
+        n_local_heads=8,
+        dim=4096,
+        intermediate_size=14336,
+        vocab_size=128256,
+        rope_base=500000,
+        rope_scale_factor=8.0,
+    ),
 }
 
 
@@ -167,8 +190,10 @@ class Transformer(nn.Module):
                 dtype,
             )
 
+        # Use max_seq_length instead of block_size for RoPE frequencies
+        # to prevent index out of bounds errors
         self.freqs_cis = precompute_freqs_cis(
-            self.config.block_size,
+            max_seq_length,
             self.config.dim // self.config.n_head,
             self.config.rope_base,
             self.config.rope_scale_factor,
@@ -195,7 +220,8 @@ class Transformer(nn.Module):
 
     @classmethod
     def from_name(cls, name: str, **config_kwargs):
-        return cls(ModelArgs.from_name(name, **config_kwargs))
+        config = ModelArgs.from_name(name, **config_kwargs)
+        return cls(config)
 
 
 class TransformerBlock(nn.Module):
@@ -231,12 +257,20 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(config.dim, total_head_dim, bias=False)
         self.wo = nn.Linear(config.dim, config.dim, bias=False)
 
-        if config.attention == "dense":
+        # Check if SparQ is enabled and has valid configuration
+        if config.attention == "sparq":
+            # If compression ratio is 0 or invalid, fall back to dense attention
+            if config.sparq.rk.ratio <= 0:
+                print(f"Warning: Invalid SparQ compression ratio {config.sparq.rk.ratio}, falling back to dense attention")
+                self.attention_function = DenseAttentionFunction(config)
+            else:
+                self.attention_function = SparQAttention(
+                    config.sparq, config.n_head, config.n_local_heads
+                )
+        elif config.attention == "dense":
             self.attention_function = DenseAttentionFunction(config)
-        elif config.attention == "sparq":
-            self.attention_function = SparQAttention(
-                config.sparq, config.n_head, config.n_local_heads
-            )
+        else:
+            raise ValueError(f"Unknown attention method: {config.attention}")
 
         self.n_head = config.n_head
         self.head_dim = config.head_dim
@@ -349,6 +383,8 @@ def precompute_freqs_cis(
     scale_factor: float = 1.0,
     dtype: torch.dtype = torch.bfloat16,
 ) -> Tensor:
+    # For Llama 3.1, we need to handle the rope_theta parameter properly
+    # The base parameter should be rope_theta (500000.0 for Llama 3.1)
     freqs = 1.0 / (
         base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem)
     )

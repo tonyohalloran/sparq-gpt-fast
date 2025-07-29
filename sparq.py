@@ -43,8 +43,16 @@ def get_r_k_for_compression_ratio(
     ratio: int, sequence_length: int, head_dim: int
 ) -> tuple[int, int]:
     """Gets r, k to reduce memory transferred during attention by the given ratio."""
+    if ratio <= 0:
+        raise ValueError(f"Compression ratio must be positive, got {ratio}")
+    
     r = round(head_dim / ratio)
     k = round(sequence_length / (2 * ratio))
+    
+    # Ensure minimum values
+    r = max(1, r)
+    k = max(1, k)
+    
     return r, k
 
 
@@ -86,7 +94,10 @@ class SparQAttention(nn.Module):
 
     def _prefill(self, q: Tensor, K: Tensor, V: Tensor, mask: Tensor) -> Tensor:
         if self.config.reallocation and self.config.running_V_mean:
-            self.V_mean.init(V)
+            # V has been repeated to match Q's head count, but we need the original V for V_mean
+            # We can get the original V by taking the first n_local_heads
+            V_original = V[:, :self.n_local_heads, :, :]
+            self.V_mean.init(V_original)
         return F.scaled_dot_product_attention(q, K, V, mask)
 
     def _generate(
@@ -119,10 +130,20 @@ class SparQAttention(nn.Module):
                 max_batch_size, max_seq_length, n_heads, head_dim, dtype
             )
 
-        self.V_mean = RunningVMean(max_batch_size, n_heads, head_dim)
+        # Use n_local_heads for RunningVMean since it should match the number of heads in the V tensor
+        self.V_mean = RunningVMean(max_batch_size, self.n_local_heads, head_dim)
+        
+        # Check if compression ratio is valid
+        if self.config.rk.ratio <= 0:
+            raise ValueError(f"Invalid compression ratio: {self.config.rk.ratio}. Compression ratio must be positive.")
+        
         self.r, self.k = get_r_k_for_compression_ratio(
             self.config.rk.ratio, max_seq_length, head_dim
         )
+        
+        # Additional validation to ensure r and k are valid
+        if self.r <= 0 or self.k <= 0:
+            raise ValueError(f"Invalid SparQ parameters: r={self.r}, k={self.k}. These must be positive.")
 
 
 class RunningVMean(nn.Module):
@@ -233,6 +254,10 @@ def sparq_attn(
     k: int,
     config: SparQArgs,
 ) -> Tensor:
+    # Validate inputs
+    if r <= 0 or k <= 0:
+        raise ValueError(f"Invalid SparQ parameters: r={r}, k={k}. These must be positive.")
+    
     # 1. Approximate attention scores using r largest components of Q
     absQ = torch.abs(Q)
     absQ_hat, i1 = torch.topk(absQ, r, dim=-1, sorted=config.sort_stage_1_top_k)
@@ -257,6 +282,10 @@ def sparq_attn(
 
     # 3. Estimate the total score of the top k, and interpolate with V_mean
     if V_mean is not None:
+        # If V_mean has fewer heads than V, repeat it to match
+        if V_mean.shape[1] != V.shape[1]:
+            repeat_factor = V.shape[1] // V_mean.shape[1]
+            V_mean = V_mean.repeat_interleave(repeat_factor, dim=1)
         return torch.lerp(V_mean, y_, s_hat_i2.sum(-1, keepdim=True))
     else:
         return y_

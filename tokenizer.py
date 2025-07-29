@@ -37,6 +37,10 @@ class SentencePieceWrapper(TokenizerInterface):
 
     def eos_id(self):
         return self.processor.eos_id()
+    
+    @property
+    def vocab_size(self):
+        return self.processor.get_piece_size()
 
 class TiktokenWrapper(TokenizerInterface):
     """
@@ -93,6 +97,10 @@ class TiktokenWrapper(TokenizerInterface):
 
     def eos_id(self):
         return self._eos_id
+    
+    @property
+    def vocab_size(self):
+        return len(self.model._mergeable_ranks) + len(self.special_tokens)
 
 def get_tokenizer(tokenizer_model_path, model_name):
     """

@@ -55,11 +55,14 @@ def generate_text(model, tokenizer, prompt: str, max_new_tokens: int = 512, devi
     input_pos = torch.arange(0, encoded_prompt.size(0), device=device)
     
     with torch.no_grad():
-        # Prefill
-        next_token = prefill(model, encoded_prompt.view(1, -1), input_pos, temperature=0)
+        # Prefill phase: process the entire prompt to fill KV cache
+        logits = model(encoded_prompt.view(1, -1), input_pos, prefill=True)
+        
+        # Sample the first token from the last position
+        next_token, _ = sample(logits, temperature=0, top_k=1)
         generated_tokens.append(next_token.item())
         
-        # Generate tokens
+        # Generate tokens one by one
         for i in range(max_new_tokens - 1):
             input_pos = torch.tensor([encoded_prompt.size(0) + i], device=device, dtype=torch.int)
             logits = forward_for_generate(model, next_token.view(1, -1), input_pos)

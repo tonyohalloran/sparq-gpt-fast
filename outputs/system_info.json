@@ -1,0 +1,8 @@
+{
+  "torch_version": "2.6.0+cu124",
+  "cuda_available": true,
+  "cuda_version": "12.4",
+  "gpu_name": "NVIDIA RTX A6000",
+  "git_commit": "7c5b8cc4f1d5a9d7470af29cbb273855529834a6",
+  "git_branch": "with-sparq"
+}
